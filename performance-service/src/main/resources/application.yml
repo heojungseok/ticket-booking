@@ -1,0 +1,24 @@
+server:
+  port: ${SERVER_PORT:8002}
+
+spring:
+  application:
+    name: performance-service
+  datasource:
+    url: ${PERFORMANCE_DB_URL:jdbc:postgresql://localhost:5433/performance_db}
+    username: ${PERFORMANCE_DB_USERNAME:ticket_performance}
+    password: ${PERFORMANCE_DB_PASSWORD:ticket_performance_pw}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

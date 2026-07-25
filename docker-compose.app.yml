@@ -1,0 +1,116 @@
+services:
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    image: ticket-booking/api-gateway:local
+    environment:
+      SERVER_PORT: "8000"
+    ports:
+      - target: 8000
+        published: "8000"
+        host_ip: 127.0.0.1
+
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    image: ticket-booking/user-service:local
+    environment:
+      SERVER_PORT: "8001"
+      USER_DB_URL: jdbc:postgresql://user-db:5432/${USER_DB_NAME:?}
+      USER_DB_USERNAME: ${USER_DB_USERNAME:?}
+      USER_DB_PASSWORD: ${USER_DB_PASSWORD:?}
+    ports:
+      - target: 8001
+        published: "8001"
+        host_ip: 127.0.0.1
+    depends_on:
+      user-db:
+        condition: service_healthy
+
+  performance-service:
+    build:
+      context: ./performance-service
+      dockerfile: Dockerfile
+    image: ticket-booking/performance-service:local
+    environment:
+      SERVER_PORT: "8002"
+      PERFORMANCE_DB_URL: jdbc:postgresql://performance-db:5432/${PERFORMANCE_DB_NAME:?}
+      PERFORMANCE_DB_USERNAME: ${PERFORMANCE_DB_USERNAME:?}
+      PERFORMANCE_DB_PASSWORD: ${PERFORMANCE_DB_PASSWORD:?}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - target: 8002
+        published: "8002"
+        host_ip: 127.0.0.1
+    depends_on:
+      performance-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  booking-service:
+    build:
+      context: ./booking-service
+      dockerfile: Dockerfile
+    image: ticket-booking/booking-service:local
+    environment:
+      SERVER_PORT: "8003"
+      BOOKING_DB_URL: jdbc:postgresql://booking-db:5432/${BOOKING_DB_NAME:?}
+      BOOKING_DB_USERNAME: ${BOOKING_DB_USERNAME:?}
+      BOOKING_DB_PASSWORD: ${BOOKING_DB_PASSWORD:?}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - target: 8003
+        published: "8003"
+        host_ip: 127.0.0.1
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    image: ticket-booking/notification-service:local
+    environment:
+      SERVER_PORT: "8004"
+      MONGODB_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:?}:${MONGO_INITDB_ROOT_PASSWORD:?}@notification-db:27017/notification_db?authSource=admin
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - target: 8004
+        published: "8004"
+        host_ip: 127.0.0.1
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  queue-service:
+    build:
+      context: ./queue-service
+      dockerfile: Dockerfile
+    image: ticket-booking/queue-service:local
+    environment:
+      SERVER_PORT: "8005"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    ports:
+      - target: 8005
+        published: "8005"
+        host_ip: 127.0.0.1
+    depends_on:
+      redis:
+        condition: service_healthy

@@ -150,19 +150,37 @@ curl -sS --max-time 3 -o <service>.json -w '%{http_code}' <url>
 ```
 
 The following polls every two seconds for up to 180 seconds. Each service passes
-only when the response is HTTP 200 and `jq -e '.status == "UP"'` succeeds:
+only when the response is HTTP 200 and `jq -e '.status == "UP"'` succeeds. The
+deadline is fixed before the first request, so command execution time counts
+against it; each sleep is `min(2, remaining)` seconds:
 
 ```bash
-poll_health() {
-  service="$1"
-  url="$2"
+sleep_until_poll_deadline() {
+  local deadline="$1"
+  local remaining=$((deadline - SECONDS))
 
-  for _ in {1..90}; do
-    code="$(curl -sS --max-time 3 -o "${service}.json" -w '%{http_code}' "$url" || true)"
+  (( remaining > 0 )) || return 1
+  (( remaining > 2 )) && remaining=2
+  sleep "$remaining"
+}
+
+poll_health() {
+  local service="$1"
+  local url="$2"
+  local deadline=$((SECONDS + 180))
+  local remaining
+  local curl_timeout
+  local code
+
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    curl_timeout="$remaining"
+    (( curl_timeout > 3 )) && curl_timeout=3
+    code="$(curl -sS --max-time "$curl_timeout" -o "${service}.json" -w '%{http_code}' "$url" || true)"
     if [ "$code" = "200" ] && jq -e '.status == "UP"' "${service}.json" >/dev/null; then
       return 0
     fi
-    sleep 2
+    sleep_until_poll_deadline "$deadline" || break
   done
 
   printf '%s did not reach application health within 180 seconds\n' "$service"
@@ -184,13 +202,47 @@ or that either direction of the Phase 1 event flow works.
 ## Phase 1 functional E2E
 
 This E2E covers only the implemented performance and booking path. Run it after
-all six application-health checks pass. Use a new shell with `.env` exported so
-database usernames and database names come from the local file:
+all six application-health checks pass. Use a new Bash shell with `.env` exported
+so database usernames and database names come from the local file. Define the
+wall-clock polling helpers in this shell as well; the Kafka recovery procedure
+reuses `poll_health`:
 
 ```bash
 set -a
 source .env
 set +a
+
+sleep_until_poll_deadline() {
+  local deadline="$1"
+  local remaining=$((deadline - SECONDS))
+
+  (( remaining > 0 )) || return 1
+  (( remaining > 2 )) && remaining=2
+  sleep "$remaining"
+}
+
+poll_health() {
+  local service="$1"
+  local url="$2"
+  local deadline=$((SECONDS + 180))
+  local remaining
+  local curl_timeout
+  local code
+
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    curl_timeout="$remaining"
+    (( curl_timeout > 3 )) && curl_timeout=3
+    code="$(curl -sS --max-time "$curl_timeout" -o "${service}.json" -w '%{http_code}' "$url" || true)"
+    if [ "$code" = "200" ] && jq -e '.status == "UP"' "${service}.json" >/dev/null; then
+      return 0
+    fi
+    sleep_until_poll_deadline "$deadline" || break
+  done
+
+  printf '%s did not reach application health within 180 seconds\n' "$service"
+  return 1
+}
 ```
 
 ### 1. Create a fresh performance and seat dataset
@@ -229,7 +281,9 @@ when diagnosing a fresh cycle.
 ### 2. Prove `SEATS_CREATED` publication and booking projection
 
 Do not use a fixed sleep. Poll at two-second intervals for at most 60 seconds.
-First, run this exact performance outbox query:
+Each loop fixes its wall-clock deadline before the first query, so database command
+time counts against the same deadline. First, run this exact performance outbox
+query:
 
 ```sql
 select id,status,retry_count from outbox_events where aggregate_id='${PERFORMANCE_ID}' and event_type='SEATS_CREATED' order by created_at desc limit 1;
@@ -238,8 +292,9 @@ select id,status,retry_count from outbox_events where aggregate_id='${PERFORMANC
 The command and assertion are:
 
 ```bash
-unset PERFORMANCE_EVENT_ID
-for _ in {1..30}; do
+unset PERFORMANCE_EVENT_ID PERFORMANCE_OUTBOX_ROW
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   PERFORMANCE_OUTBOX_ROW="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T performance-db \
     psql -U "$PERFORMANCE_DB_USERNAME" -d "$PERFORMANCE_DB_NAME" -Atc \
     "select id,status,retry_count from outbox_events where aggregate_id='${PERFORMANCE_ID}' and event_type='SEATS_CREATED' order by created_at desc limit 1;")"
@@ -249,7 +304,7 @@ for _ in {1..30}; do
       break
       ;;
   esac
-  sleep 2
+  sleep_until_poll_deadline "$deadline" || break
 done
 test -n "${PERFORMANCE_EVENT_ID:-}" || exit 1
 test "$PERFORMANCE_OUTBOX_ROW" = "${PERFORMANCE_EVENT_ID}|PUBLISHED|0" || exit 1
@@ -263,12 +318,14 @@ select performance_id,status from booking_seats where seat_id='${SEAT_ID}';
 ```
 
 ```bash
-for _ in {1..30}; do
+unset BOOKING_SEAT_ROW
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   BOOKING_SEAT_ROW="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T booking-db \
     psql -U "$BOOKING_DB_USERNAME" -d "$BOOKING_DB_NAME" -Atc \
     "select performance_id,status from booking_seats where seat_id='${SEAT_ID}';")"
   [ "$BOOKING_SEAT_ROW" = "${PERFORMANCE_ID}|AVAILABLE" ] && break
-  sleep 2
+  sleep_until_poll_deadline "$deadline" || break
 done
 test "$BOOKING_SEAT_ROW" = "${PERFORMANCE_ID}|AVAILABLE" || exit 1
 ```
@@ -280,12 +337,14 @@ select event_id from processed_events where event_id='${PERFORMANCE_EVENT_ID}' a
 ```
 
 ```bash
-for _ in {1..30}; do
+unset BOOKING_PROCESSED_EVENT_ID
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   BOOKING_PROCESSED_EVENT_ID="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T booking-db \
     psql -U "$BOOKING_DB_USERNAME" -d "$BOOKING_DB_NAME" -Atc \
     "select event_id from processed_events where event_id='${PERFORMANCE_EVENT_ID}' and consumer_name='booking-seats-created-consumer' and event_type='SEATS_CREATED';")"
   [ "$BOOKING_PROCESSED_EVENT_ID" = "$PERFORMANCE_EVENT_ID" ] && break
-  sleep 2
+  sleep_until_poll_deadline "$deadline" || break
 done
 test "$BOOKING_PROCESSED_EVENT_ID" = "$PERFORMANCE_EVENT_ID" || exit 1
 ```
@@ -353,8 +412,9 @@ select id,status,retry_count from outbox_events where aggregate_id='${BOOKING_ID
 ```
 
 ```bash
-unset BOOKING_EVENT_ID
-for _ in {1..30}; do
+unset BOOKING_EVENT_ID BOOKING_OUTBOX_ROW
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   BOOKING_OUTBOX_ROW="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T booking-db \
     psql -U "$BOOKING_DB_USERNAME" -d "$BOOKING_DB_NAME" -Atc \
     "select id,status,retry_count from outbox_events where aggregate_id='${BOOKING_ID}' and event_type='BOOKING_PAID' order by created_at desc limit 1;")"
@@ -364,7 +424,7 @@ for _ in {1..30}; do
       break
       ;;
   esac
-  sleep 2
+  sleep_until_poll_deadline "$deadline" || break
 done
 test -n "${BOOKING_EVENT_ID:-}" || exit 1
 test "$BOOKING_OUTBOX_ROW" = "${BOOKING_EVENT_ID}|PUBLISHED|0" || exit 1
@@ -377,12 +437,14 @@ select event_id from processed_events where event_id='${BOOKING_EVENT_ID}' and c
 ```
 
 ```bash
-for _ in {1..30}; do
+unset PERFORMANCE_PROCESSED_EVENT_ID
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   PERFORMANCE_PROCESSED_EVENT_ID="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T performance-db \
     psql -U "$PERFORMANCE_DB_USERNAME" -d "$PERFORMANCE_DB_NAME" -Atc \
     "select event_id from processed_events where event_id='${BOOKING_EVENT_ID}' and consumer_name='performance-booking-paid-consumer' and event_type='BOOKING_PAID';")"
   [ "$PERFORMANCE_PROCESSED_EVENT_ID" = "$BOOKING_EVENT_ID" ] && break
-  sleep 2
+  sleep_until_poll_deadline "$deadline" || break
 done
 test "$PERFORMANCE_PROCESSED_EVENT_ID" = "$BOOKING_EVENT_ID" || exit 1
 ```
@@ -394,12 +456,14 @@ select status from seats where id='${SEAT_ID}' and performance_id='${PERFORMANCE
 ```
 
 ```bash
-for _ in {1..30}; do
+unset PERFORMANCE_SEAT_STATUS
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   PERFORMANCE_SEAT_STATUS="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T performance-db \
     psql -U "$PERFORMANCE_DB_USERNAME" -d "$PERFORMANCE_DB_NAME" -Atc \
     "select status from seats where id='${SEAT_ID}' and performance_id='${PERFORMANCE_ID}';")"
   [ "$PERFORMANCE_SEAT_STATUS" = "BOOKED" ] && break
-  sleep 2
+  sleep_until_poll_deadline "$deadline" || break
 done
 test "$PERFORMANCE_SEAT_STATUS" = "BOOKED" || exit 1
 ```
@@ -469,7 +533,37 @@ docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml r
 After the restart, poll infrastructure state and all impacted applications for up
 to 180 seconds, at two-second intervals. Then poll the follow-up HTTP/database/event
 condition for up to 60 seconds, also at two-second intervals. Do not substitute a
-fixed sleep.
+fixed sleep. Keep the Bash polling helpers from the application-health/E2E setup
+in the current shell. This infrastructure helper requires the restarted
+dependency's existing Compose healthcheck to return `healthy` within an actual
+180-second wall-clock deadline:
+
+```bash
+poll_infra_health() {
+  local service="$1"
+  local deadline=$((SECONDS + 180))
+  local container_id
+  local health
+
+  while (( SECONDS < deadline )); do
+    container_id="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml ps -q "$service")"
+    if [ -n "$container_id" ]; then
+      health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id")"
+      [ "$health" = "healthy" ] && return 0
+    fi
+    sleep_until_poll_deadline "$deadline" || break
+  done
+
+  printf '%s did not become healthy within 180 seconds\n' "$service"
+  return 1
+}
+
+poll_infra_health <dependency> || exit 1
+```
+
+Invoke `poll_health` for every impacted application listed in the matrix. Use the
+60-second wall-clock loops from the functional E2E for fresh HTTP/event follow-up
+checks, and save each command/result in the result record.
 
 | Dependency | Pre-state to record | Expected impacted applications | Follow-up | Pass criteria |
 | --- | --- | --- | --- | --- |
@@ -481,11 +575,105 @@ fixed sleep.
 | `zookeeper` | Topic list and consumer-group offsets | Kafka, then `performance-service`, `booking-service`, and `notification-service` | Run a fresh two-way `SEATS_CREATED` and `BOOKING_PAID` cycle | Topics/offsets are preserved, both new events are processed, and no application restart is needed |
 | `kafka` | Topic end offsets and consumer-group offsets | `performance-service`, `booking-service`, and `notification-service` | Run a fresh two-way `SEATS_CREATED` and `BOOKING_PAID` cycle | Existing offsets are preserved/nondecreasing, both new events are processed, and no application restart is needed |
 
-Use a unique run ID for sentinel data. For example, create and read a Mongo
-sentinel without printing the password:
+Complete one result row for every dependency drill. Store artifact paths, captured
+command output, or exact IDs in the evidence cells rather than writing only a
+summary:
+
+| Dependency | Pre-state artifact/evidence | Infra/app deadline result | Follow-up result | `automatic recovery PASS\|FAIL` | Optional `manual recovery PASS\|FAIL` |
+| --- | --- | --- | --- | --- | --- |
+| `user-db` | `<user row + Flyway capture>` | `<180s result/evidence>` | `<same-row result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+| `performance-db` | `<performance/seat capture>` | `<180s result/evidence>` | `<fresh-performance result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+| `booking-db` | `<booking/payment/outbox capture>` | `<180s result/evidence>` | `<fresh-paid-booking result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+| `notification-db` | `<Mongo sentinel capture>` | `<180s result/evidence>` | `<same-document result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+| `redis` | `<three-key capture>` | `<180s result/evidence>` | `<fresh-lock result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+| `zookeeper` | `<topics/offsets capture>` | `<180s result/evidence>` | `<fresh-two-way-event result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+| `kafka` | `<end/consumer-offset capture>` | `<180s result/evidence>` | `<fresh-two-way-event result/evidence>` | `<PASS\|FAIL>` | `<PASS\|FAIL\|N/A>` |
+
+Any `automatic recovery FAIL` fails M4 even when manual recovery passes. If an
+automatic result fails, manual recovery is optional diagnostic evidence; it cannot
+turn the automatic result or M4 result into a pass.
+
+### Persistence sentinels
+
+Use one fresh lower-case UUID as the run ID for the PostgreSQL, MongoDB, and Redis
+sentinels. Export `.env` in the same shell:
 
 ```bash
+set -a
+source .env
+set +a
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+```
+
+On a clean boot, wait for `user-service` application health first so Flyway has
+created the schema. Then insert a user-database sentinel with fixed, non-secret
+test values. This direct SQL row is only a persistence sentinel; it is not a user
+signup flow and must not be presented as one:
+
+```bash
+USER_SENTINEL_INSERT="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T user-db \
+  psql -v ON_ERROR_STOP=1 -U "$USER_DB_USERNAME" -d "$USER_DB_NAME" -Atc \
+  "insert into users(id,email,password_hash,name,role,status,created_at,updated_at) values ('${RUN_ID}','task4-${RUN_ID}@example.invalid','task4-fixed-test-hash','Task 4 Sentinel','USER','ACTIVE',current_timestamp,current_timestamp) returning id,email,password_hash,name,role,status;")" || exit 1
+test -n "$USER_SENTINEL_INSERT" || exit 1
+
+USER_SENTINEL_ROW_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T user-db \
+  psql -v ON_ERROR_STOP=1 -U "$USER_DB_USERNAME" -d "$USER_DB_NAME" -Atc \
+  "select id,email,password_hash,name,role,status from users where id='${RUN_ID}';")" || exit 1
+FLYWAY_STATE_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T user-db \
+  psql -v ON_ERROR_STOP=1 -U "$USER_DB_USERNAME" -d "$USER_DB_NAME" -Atc \
+  "select version,checksum from flyway_schema_history order by installed_rank;")" || exit 1
+test -n "$USER_SENTINEL_ROW_BEFORE" || exit 1
+test -n "$FLYWAY_STATE_BEFORE" || exit 1
+```
+
+After the `user-db` restart or full-stack down/up cycle, read and compare the exact
+same row and migration state:
+
+```bash
+USER_SENTINEL_ROW_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T user-db \
+  psql -v ON_ERROR_STOP=1 -U "$USER_DB_USERNAME" -d "$USER_DB_NAME" -Atc \
+  "select id,email,password_hash,name,role,status from users where id='${RUN_ID}';")" || exit 1
+FLYWAY_STATE_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T user-db \
+  psql -v ON_ERROR_STOP=1 -U "$USER_DB_USERNAME" -d "$USER_DB_NAME" -Atc \
+  "select version,checksum from flyway_schema_history order by installed_rank;")" || exit 1
+test "$USER_SENTINEL_ROW_AFTER" = "$USER_SENTINEL_ROW_BEFORE" || exit 1
+test "$FLYWAY_STATE_AFTER" = "$FLYWAY_STATE_BEFORE" || exit 1
+```
+
+Create three distinct Redis sentinels with representative, non-secret values and
+capture them before the restart or full-stack down:
+
+```bash
+REDIS_PERFORMANCE_KEY="task4:persistence:${RUN_ID}:performance"
+REDIS_BOOKING_KEY="task4:persistence:${RUN_ID}:booking"
+REDIS_QUEUE_KEY="task4:persistence:${RUN_ID}:queue"
+
+test "$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli SET "$REDIS_PERFORMANCE_KEY" task4-performance-preserve)" = "OK" || exit 1
+test "$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli SET "$REDIS_BOOKING_KEY" task4-booking-preserve)" = "OK" || exit 1
+test "$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli SET "$REDIS_QUEUE_KEY" task4-queue-preserve)" = "OK" || exit 1
+
+REDIS_PERFORMANCE_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli GET "$REDIS_PERFORMANCE_KEY")"
+REDIS_BOOKING_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli GET "$REDIS_BOOKING_KEY")"
+REDIS_QUEUE_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli GET "$REDIS_QUEUE_KEY")"
+test "$REDIS_PERFORMANCE_BEFORE" = "task4-performance-preserve" || exit 1
+test "$REDIS_BOOKING_BEFORE" = "task4-booking-preserve" || exit 1
+test "$REDIS_QUEUE_BEFORE" = "task4-queue-preserve" || exit 1
+```
+
+After the restart or full-stack up, read the same keys and compare their values:
+
+```bash
+REDIS_PERFORMANCE_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli GET "$REDIS_PERFORMANCE_KEY")"
+REDIS_BOOKING_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli GET "$REDIS_BOOKING_KEY")"
+REDIS_QUEUE_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T redis redis-cli GET "$REDIS_QUEUE_KEY")"
+test "$REDIS_PERFORMANCE_AFTER" = "$REDIS_PERFORMANCE_BEFORE" || exit 1
+test "$REDIS_BOOKING_AFTER" = "$REDIS_BOOKING_BEFORE" || exit 1
+test "$REDIS_QUEUE_AFTER" = "$REDIS_QUEUE_BEFORE" || exit 1
+```
+
+Create and read a Mongo sentinel without printing the password:
+
+```bash
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
   mongosh --quiet \
   --username "$MONGO_INITDB_ROOT_USERNAME" \
@@ -546,8 +734,9 @@ Within `NEGATIVE_DEADLINE_SECONDS`, the new performance outbox row is expected t
 become `FAILED|1`:
 
 ```bash
-NEGATIVE_ELAPSED=0
-while [ "$NEGATIVE_ELAPSED" -le "$NEGATIVE_DEADLINE_SECONDS" ]; do
+unset NEGATIVE_EVENT_ID NEGATIVE_OUTBOX_ROW
+deadline=$((SECONDS + NEGATIVE_DEADLINE_SECONDS))
+while (( SECONDS < deadline )); do
   NEGATIVE_OUTBOX_ROW="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T performance-db \
     psql -U "$PERFORMANCE_DB_USERNAME" -d "$PERFORMANCE_DB_NAME" -Atc \
     "select id,status,retry_count from outbox_events where aggregate_id='${PERFORMANCE_ID}' and event_type='SEATS_CREATED' order by created_at desc limit 1;")"
@@ -557,9 +746,9 @@ while [ "$NEGATIVE_ELAPSED" -le "$NEGATIVE_DEADLINE_SECONDS" ]; do
       break
       ;;
   esac
-  sleep 2
-  NEGATIVE_ELAPSED=$((NEGATIVE_ELAPSED + 2))
+  sleep_until_poll_deadline "$deadline" || break
 done
+test -n "${NEGATIVE_EVENT_ID:-}" || exit 1
 test "$NEGATIVE_OUTBOX_ROW" = "${NEGATIVE_EVENT_ID}|FAILED|1" || exit 1
 ```
 
@@ -569,12 +758,29 @@ Recover Kafka and apply the 180-second infrastructure/application-health gate:
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml up -d --wait --wait-timeout 180 kafka
 ```
 
+Re-run application health for the three applications included in the Kafka
+recovery observation with the wall-clock-bounded `poll_health` helper. Each call
+independently requires HTTP 200 and `.status == "UP"` within 180 seconds:
+
+```bash
+poll_health performance-service http://localhost:8002/actuator/health || exit 1
+poll_health booking-service http://localhost:8003/actuator/health || exit 1
+poll_health notification-service http://localhost:8004/actuator/health || exit 1
+```
+
+`notification-service` currently has no Kafka listener, producer behavior, or Kafka health contributor. Its HTTP result is only an
+application-health observation; it does not prove broker reconnect behavior.
+Broker reconnect proof comes from the required fresh performance-to-booking and
+booking-to-performance event cycle.
+
 After recovery, the exact same outbox row is expected to remain `FAILED|1`. Poll
 for 60 seconds and require no matching booking `processed_events` row and no
 `booking_seats` projection:
 
 ```bash
-for _ in {1..30}; do
+unset RECOVERED_OUTBOX_ROW BOOKING_NEGATIVE_PROCESSED BOOKING_NEGATIVE_SEAT
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
   RECOVERED_OUTBOX_ROW="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T performance-db \
     psql -U "$PERFORMANCE_DB_USERNAME" -d "$PERFORMANCE_DB_NAME" -Atc \
     "select id,status,retry_count from outbox_events where id='${NEGATIVE_EVENT_ID}';")"
@@ -584,7 +790,10 @@ for _ in {1..30}; do
   BOOKING_NEGATIVE_SEAT="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T booking-db \
     psql -U "$BOOKING_DB_USERNAME" -d "$BOOKING_DB_NAME" -Atc \
     "select seat_id from booking_seats where seat_id='${SEAT_ID}';")"
-  sleep 2
+  test "$RECOVERED_OUTBOX_ROW" = "${NEGATIVE_EVENT_ID}|FAILED|1" || exit 1
+  test -z "$BOOKING_NEGATIVE_PROCESSED" || exit 1
+  test -z "$BOOKING_NEGATIVE_SEAT" || exit 1
+  sleep_until_poll_deadline "$deadline" || break
 done
 
 test "$RECOVERED_OUTBOX_ROW" = "${NEGATIVE_EVENT_ID}|FAILED|1" || exit 1
@@ -604,6 +813,11 @@ Before stopping the full stack, record:
 - the Mongo sentinel document;
 - the Redis sentinel keys and values;
 - Kafka topics, topic end offsets, and consumer-group offsets.
+
+Use the `*_BEFORE` captures from the persistence-sentinel procedures above for the
+user row, Flyway state, and all three Redis keys. After the base stack returns, run
+the matching `*_AFTER` blocks and require the equality assertions before starting
+host-dev applications.
 
 Stop the merged project without `-v`:
 

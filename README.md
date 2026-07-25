@@ -30,10 +30,22 @@ that a particular build, container run, recovery drill, or E2E run has passed.
 
 ## Local prerequisites and setup
 
-Install Docker with Docker Compose. Java 21 is also required when applications run
-on the host. Run the shell snippets from the repository root; `curl`, `jq`, and
-standard PostgreSQL/Kafka tools inside the containers are used by the verification
-procedures.
+Install Bash 3.2 or newer, `uuidgen`, `curl`, `jq`, Docker, and Docker Compose v2.
+Java 21 is also required when applications run on the host. Run the shell snippets
+from the repository root; standard PostgreSQL/Kafka tools inside the containers
+are used by the verification procedures.
+
+Check the local commands and confirm this Compose build supports the two wait
+flags used by the guide:
+
+```bash
+command -v bash || exit 1
+command -v uuidgen curl jq || exit 1
+bash --version | sed -n '1p'
+docker compose version || exit 1
+docker compose up --help | grep -q -- '--wait' || exit 1
+docker compose up --help | grep -q -- '--wait-timeout' || exit 1
+```
 
 Create the local environment file:
 
@@ -45,12 +57,123 @@ The local-only `.env` is ignored and must not be committed. Replace every sample
 secret before use, keep the file private, and never paste expanded secret values
 into logs or evidence.
 
+Before Bash sources `.env`, validate it as inert text with this canonical
+Bash-3.2-compatible function. It permits blank separator lines, but rejects
+comments, whitespace-only lines, quotes, duplicate/unknown/missing keys, empty or
+malformed assignments, and every character outside the conservative value
+alphabet. Error output identifies only a line number or key, never a value:
+
+```bash
+validate_dotenv() {
+  local file="${1:-.env}"
+  local line
+  local line_number=0
+  local key
+  local value
+  local expected
+  local allowed
+  local seen='|'
+  local required_keys=(
+    USER_DB_NAME
+    USER_DB_USERNAME
+    USER_DB_PASSWORD
+    PERFORMANCE_DB_NAME
+    PERFORMANCE_DB_USERNAME
+    PERFORMANCE_DB_PASSWORD
+    BOOKING_DB_NAME
+    BOOKING_DB_USERNAME
+    BOOKING_DB_PASSWORD
+    MONGO_INITDB_ROOT_USERNAME
+    MONGO_INITDB_ROOT_PASSWORD
+    MONGODB_URI
+    REDIS_HOST
+    REDIS_PORT
+    KAFKA_BOOTSTRAP_SERVERS
+  )
+
+  [ -r "$file" ] || {
+    printf 'dotenv is not readable: %s\n' "$file" >&2
+    return 1
+  }
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    [ -z "$line" ] && continue
+
+    if [[ ! "$line" =~ ^([A-Z][A-Z0-9_]*)=([A-Za-z0-9._:/@?=-]+)$ ]]; then
+      printf 'dotenv line %s is not a supported assignment\n' "$line_number" >&2
+      return 1
+    fi
+
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    allowed=0
+    for expected in "${required_keys[@]}"; do
+      if [ "$key" = "$expected" ]; then
+        allowed=1
+        break
+      fi
+    done
+    if [ "$allowed" -ne 1 ]; then
+      printf 'dotenv contains unknown key: %s\n' "$key" >&2
+      return 1
+    fi
+
+    case "$seen" in
+      *"|${key}|"*)
+        printf 'dotenv contains duplicate key: %s\n' "$key" >&2
+        return 1
+        ;;
+    esac
+    seen="${seen}${key}|"
+
+    case "$key" in
+      MONGO_INITDB_ROOT_USERNAME|MONGO_INITDB_ROOT_PASSWORD)
+        if [[ ! "$value" =~ ^[A-Za-z0-9._-]+$ ]]; then
+          printf 'dotenv Mongo credential is not URI-safe: %s\n' "$key" >&2
+          return 1
+        fi
+        ;;
+    esac
+  done < "$file"
+
+  for expected in "${required_keys[@]}"; do
+    case "$seen" in
+      *"|${expected}|"*) ;;
+      *)
+        printf 'dotenv is missing required key: %s\n' "$expected" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+validate_dotenv .env || exit 1
+```
+
+The allowed general value alphabet is `[A-Za-z0-9._:/@?=-]+`. Mongo root
+username/password values are further limited to `[A-Za-z0-9._-]+`. Consequently,
+the shared file cannot contain shell-executable characters such as `$`, backticks,
+`;`, `&`, `|`, parentheses, redirects, backslashes, spaces, comments, or quotes.
+This restricted shared dotenv format prevents Bash execution and Compose semantic drift. A secret that cannot fit the format requires redesigning/encoding
+the connection configuration; do not copy-paste it into this sourced file.
+
+Run the canonical validator block once in every new verification Bash shell and
+require `validate_dotenv .env` to pass before any `source .env`. Later sections
+reuse that function by name instead of redefining it.
+
 The current MongoDB URI is assembled directly from the root username and password
 in container mode, while host mode reads the URI from `.env`. Until that connection
 construction is redesigned to encode credentials, local Mongo root usernames and
 passwords must avoid URI-reserved characters such as `@`, `:`, `/`, `?`, `#`, `%`,
 and similar delimiters. Keep `MONGODB_URI` synchronized with the chosen local
 credentials.
+
+Initialization credentials must be chosen before the first named-volume creation.
+Changing PostgreSQL or Mongo initialization values in `.env` later does not rotate
+credentials already stored in existing named volumes. Credential rotation needs
+an explicit database migration/redesign; destructive volume recreation remains a
+separately approved operation.
 
 For IntelliJ, open the repository root as a Gradle project and select a Java 21
 SDK/toolchain. Do not depend on a machine-specific repository or JDK path.
@@ -60,25 +183,27 @@ SDK/toolchain. Do not depend on a machine-specific repository or JDK path.
 Host-dev mode runs only the base infrastructure in containers:
 
 ```bash
+validate_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml up -d --wait --wait-timeout 180
 ```
 
 Run each application as a separate host process, with `.env` explicitly exported
-in that terminal. The reusable form is:
+in that terminal. First run the canonical validator function in each terminal;
+then use this reusable form:
 
 ```bash
-set -a; source .env; set +a; ./gradlew :<module>:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :<module>:bootRun
 ```
 
 Use one terminal/process for each of the six modules:
 
 ```bash
-set -a; source .env; set +a; ./gradlew :api-gateway:bootRun
-set -a; source .env; set +a; ./gradlew :user-service:bootRun
-set -a; source .env; set +a; ./gradlew :performance-service:bootRun
-set -a; source .env; set +a; ./gradlew :booking-service:bootRun
-set -a; source .env; set +a; ./gradlew :notification-service:bootRun
-set -a; source .env; set +a; ./gradlew :queue-service:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :api-gateway:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :user-service:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :performance-service:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :booking-service:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :notification-service:bootRun
+validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :queue-service:bootRun
 ```
 
 This mode preserves each application's localhost defaults and the infrastructure
@@ -115,6 +240,7 @@ done
 Validate the merged configuration, build images, and start the full stack:
 
 ```bash
+validate_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml config --quiet
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml build
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml up -d --wait --wait-timeout 180
@@ -202,47 +328,17 @@ or that either direction of the Phase 1 event flow works.
 ## Phase 1 functional E2E
 
 This E2E covers only the implemented performance and booking path. Run it after
-all six application-health checks pass. Use a new Bash shell with `.env` exported
-so database usernames and database names come from the local file. Define the
-wall-clock polling helpers in this shell as well; the Kafka recovery procedure
-reuses `poll_health`:
+all six application-health checks pass. Continue in the same verification Bash
+shell so the canonical dotenv validator and application-health polling helpers
+remain defined. If a new shell is necessary, rerun the single canonical validator
+block and the single application-health helper block above before continuing.
+Export `.env` only after validation succeeds:
 
 ```bash
+validate_dotenv .env || exit 1
 set -a
 source .env
 set +a
-
-sleep_until_poll_deadline() {
-  local deadline="$1"
-  local remaining=$((deadline - SECONDS))
-
-  (( remaining > 0 )) || return 1
-  (( remaining > 2 )) && remaining=2
-  sleep "$remaining"
-}
-
-poll_health() {
-  local service="$1"
-  local url="$2"
-  local deadline=$((SECONDS + 180))
-  local remaining
-  local curl_timeout
-  local code
-
-  while (( SECONDS < deadline )); do
-    remaining=$((deadline - SECONDS))
-    curl_timeout="$remaining"
-    (( curl_timeout > 3 )) && curl_timeout=3
-    code="$(curl -sS --max-time "$curl_timeout" -o "${service}.json" -w '%{http_code}' "$url" || true)"
-    if [ "$code" = "200" ] && jq -e '.status == "UP"' "${service}.json" >/dev/null; then
-      return 0
-    fi
-    sleep_until_poll_deadline "$deadline" || break
-  done
-
-  printf '%s did not reach application health within 180 seconds\n' "$service"
-  return 1
-}
 ```
 
 ### 1. Create a fresh performance and seat dataset
@@ -599,6 +695,7 @@ Use one fresh lower-case UUID as the run ID for the PostgreSQL, MongoDB, and Red
 sentinels. Export `.env` in the same shell:
 
 ```bash
+validate_dotenv .env || exit 1
 set -a
 source .env
 set +a
@@ -671,23 +768,46 @@ test "$REDIS_BOOKING_AFTER" = "$REDIS_BOOKING_BEFORE" || exit 1
 test "$REDIS_QUEUE_AFTER" = "$REDIS_QUEUE_BEFORE" || exit 1
 ```
 
-Create and read a Mongo sentinel without printing the password:
+Upsert the Mongo sentinel, then capture a deterministic JSON projection containing
+only `_id` and `value`. `--quiet` and the projection prevent unrelated document
+fields from entering the evidence; none of these commands prints the password:
 
 ```bash
+MONGO_SENTINEL_EXPECTED="{\"_id\":\"${RUN_ID}\",\"value\":\"preserve-me\"}"
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
   mongosh --quiet \
   --username "$MONGO_INITDB_ROOT_USERNAME" \
   --password "$MONGO_INITDB_ROOT_PASSWORD" \
   --authenticationDatabase admin \
   notification_db \
-  --eval "db.m4_sentinels.updateOne({_id:'${RUN_ID}'},{\$set:{value:'preserve-me'}},{upsert:true})"
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
+  --eval "const result=db.m4_sentinels.updateOne({_id:'${RUN_ID}'},{\$set:{value:'preserve-me'}},{upsert:true}); if (!result.acknowledged) { quit(2); }" \
+  >/dev/null || exit 1
+
+MONGO_SENTINEL_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
   mongosh --quiet \
   --username "$MONGO_INITDB_ROOT_USERNAME" \
   --password "$MONGO_INITDB_ROOT_PASSWORD" \
   --authenticationDatabase admin \
   notification_db \
-  --eval "db.m4_sentinels.findOne({_id:'${RUN_ID}'})"
+  --eval "const doc=db.m4_sentinels.findOne({_id:'${RUN_ID}'},{_id:1,value:1}); if (doc === null) { quit(2); } print(JSON.stringify({_id:doc._id,value:doc.value}));")" || exit 1
+test -n "$MONGO_SENTINEL_BEFORE" || exit 1
+test "$MONGO_SENTINEL_BEFORE" = "$MONGO_SENTINEL_EXPECTED" || exit 1
+```
+
+After the `notification-db` restart or full-stack down/up cycle, capture the same
+canonical projection and require exact equality:
+
+```bash
+MONGO_SENTINEL_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
+  mongosh --quiet \
+  --username "$MONGO_INITDB_ROOT_USERNAME" \
+  --password "$MONGO_INITDB_ROOT_PASSWORD" \
+  --authenticationDatabase admin \
+  notification_db \
+  --eval "const doc=db.m4_sentinels.findOne({_id:'${RUN_ID}'},{_id:1,value:1}); if (doc === null) { quit(2); } print(JSON.stringify({_id:doc._id,value:doc.value}));")" || exit 1
+test -n "$MONGO_SENTINEL_AFTER" || exit 1
+test "$MONGO_SENTINEL_AFTER" = "$MONGO_SENTINEL_EXPECTED" || exit 1
+test "$MONGO_SENTINEL_AFTER" = "$MONGO_SENTINEL_BEFORE" || exit 1
 ```
 
 Record Kafka topics, topic end offsets, and consumer-group offsets from the broker
@@ -709,26 +829,69 @@ drill fails the M4 resilience criterion even if the manual restart restores serv
 
 ## Kafka negative case and known limitation
 
-This is a controlled failure characterization, not a resilience-success test.
-Before stopping Kafka, inspect and log the effective producer values of
-`max.block.ms` and `delivery.timeout.ms` for the running performance-service
-instance. Do not assume library defaults. If either effective value is unavailable,
-do not run this negative case.
+This is an all-container-local-only controlled failure characterization, not a
+resilience-success test. First complete and settle a normal E2E, including both
+processed-event assertions. That cycle initializes the performance producer and
+proves there is no unresolved normal functional step.
 
-Set shell variables only from the observed values and calculate the deadline:
+Read the effective producer timeouts from the latest sanitized `ProducerConfig`
+lines in the performance-service container log. The pipeline retains only the two
+numeric key/value lines; it neither prints nor stores the full log:
 
 ```bash
-MAX_BLOCK_MS=<observed-effective-max.block.ms>
-DELIVERY_TIMEOUT_MS=<observed-effective-delivery.timeout.ms>
+PRODUCER_TIMEOUT_LINES="$(
+  docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml logs --no-color performance-service 2>/dev/null |
+    sed -nE 's/^.*(max\.block\.ms|delivery\.timeout\.ms)[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1=\2/p'
+)"
+MAX_BLOCK_MS="$(printf '%s\n' "$PRODUCER_TIMEOUT_LINES" | awk -F= '$1 == "max.block.ms" { print $2 }' | tail -n 1)"
+DELIVERY_TIMEOUT_MS="$(printf '%s\n' "$PRODUCER_TIMEOUT_LINES" | awk -F= '$1 == "delivery.timeout.ms" { print $2 }' | tail -n 1)"
+
+case "$MAX_BLOCK_MS" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'numeric max.block.ms was not found; aborting negative drill' >&2
+    exit 1
+    ;;
+esac
+case "$DELIVERY_TIMEOUT_MS" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'numeric delivery.timeout.ms was not found; aborting negative drill' >&2
+    exit 1
+    ;;
+esac
+[ "$MAX_BLOCK_MS" -gt 0 ] || exit 1
+[ "$DELIVERY_TIMEOUT_MS" -gt 0 ] || exit 1
+
 NEGATIVE_DEADLINE_SECONDS=$(( (MAX_BLOCK_MS + DELIVERY_TIMEOUT_MS + 999) / 1000 + 30 ))
 ```
 
-Stop Kafka through the merged project, create a fresh performance and fresh seat
-dataset so a new `SEATS_CREATED` outbox event exists, and poll every two seconds:
+If either effective value is missing, nonnumeric, or zero, abort; do not infer a
+library default. Host-dev logs are intentionally out of scope for this drill.
+
+Immediately before stopping Kafka, require both outbox tables to have zero
+`PENDING` rows:
+
+```bash
+PERFORMANCE_PENDING_COUNT="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T performance-db \
+  psql -U "$PERFORMANCE_DB_USERNAME" -d "$PERFORMANCE_DB_NAME" -Atc \
+  "select count(*) from outbox_events where status='PENDING';")" || exit 1
+BOOKING_PENDING_COUNT="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T booking-db \
+  psql -U "$BOOKING_DB_USERNAME" -d "$BOOKING_DB_NAME" -Atc \
+  "select count(*) from outbox_events where status='PENDING';")" || exit 1
+test "$PERFORMANCE_PENDING_COUNT" = "0" || exit 1
+test "$BOOKING_PENDING_COUNT" = "0" || exit 1
+```
+
+This settled-E2E/zero-backlog gate removes sequential pending work from the
+timeout-derived deadline. Stop Kafka through the merged project:
 
 ```bash
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml stop kafka
 ```
+
+After Kafka is stopped, repeat only Phase 1 step 1 with fresh IDs: create one fresh
+performance and one seat batch. That produces the single fresh negative-case
+`SEATS_CREATED` event. Do not create a booking or any other outbox work during this
+negative window.
 
 Within `NEGATIVE_DEADLINE_SECONDS`, the new performance outbox row is expected to
 become `FAILED|1`:
@@ -815,9 +978,9 @@ Before stopping the full stack, record:
 - Kafka topics, topic end offsets, and consumer-group offsets.
 
 Use the `*_BEFORE` captures from the persistence-sentinel procedures above for the
-user row, Flyway state, and all three Redis keys. After the base stack returns, run
-the matching `*_AFTER` blocks and require the equality assertions before starting
-host-dev applications.
+user row, Flyway state, all three Redis keys, and the canonical Mongo projection.
+After the base stack returns, run the matching `*_AFTER` blocks and require every
+equality assertion before starting host-dev applications.
 
 Stop the merged project without `-v`:
 

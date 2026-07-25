@@ -7,9 +7,15 @@ services:
       POSTGRES_USER: ${USER_DB_USERNAME}
       POSTGRES_PASSWORD: ${USER_DB_PASSWORD}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - user-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
   performance-db:
     image: postgres:16-alpine
@@ -19,9 +25,15 @@ services:
       POSTGRES_USER: ${PERFORMANCE_DB_USERNAME}
       POSTGRES_PASSWORD: ${PERFORMANCE_DB_PASSWORD}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - performance-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
   booking-db:
     image: postgres:16-alpine
@@ -31,9 +43,15 @@ services:
       POSTGRES_USER: ${BOOKING_DB_USERNAME}
       POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - booking-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
   notification-db:
     image: mongo:7
@@ -42,18 +60,30 @@ services:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - notification-db-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$${MONGO_INITDB_ROOT_USERNAME}\" --password \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand({ ping: 1 })\""]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
     container_name: ticket-redis
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
@@ -61,14 +91,22 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "cub", "zk-ready", "localhost", "2181", "5"]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     container_name: ticket-kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -80,29 +118,38 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
     ports:
-      - "9092:9092"
-      - "29092:29092"
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      interval: 10s
+      timeout: 8s
+      retries: 8
+      start_period: 30s
 
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
     container_name: ticket-kafka-ui
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
 
   redis-commander:
     image: rediscommander/redis-commander:latest
     container_name: ticket-redis-commander
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       REDIS_HOSTS: local:redis:6379
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
 
 volumes:
   user-db-data:
@@ -110,3 +157,6 @@ volumes:
   booking-db-data:
   notification-db-data:
   redis-data:
+  zookeeper-data:
+  zookeeper-log:
+  kafka-data:

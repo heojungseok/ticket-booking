@@ -1,0 +1,100 @@
+services:
+  api-gateway:
+    build:
+      context: ./api-gateway
+    image: ticket-booking/api-gateway:${IMAGE_TAG:-local}
+    container_name: ticket-api-gateway
+    environment:
+      SERVER_PORT: 8000
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  user-service:
+    build:
+      context: ./user-service
+    image: ticket-booking/user-service:${IMAGE_TAG:-local}
+    container_name: ticket-user-service
+    depends_on:
+      - user-db
+    environment:
+      SERVER_PORT: 8001
+      USER_DB_URL: ${USER_DB_URL:-jdbc:postgresql://user-db:5432/user_db}
+      USER_DB_USERNAME: ${USER_DB_USERNAME:-ticket_user}
+      USER_DB_PASSWORD: ${USER_DB_PASSWORD:-ticket_user_pw}
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  performance-service:
+    build:
+      context: ./performance-service
+    image: ticket-booking/performance-service:${IMAGE_TAG:-local}
+    container_name: ticket-performance-service
+    depends_on:
+      - performance-db
+      - redis
+      - kafka
+    environment:
+      SERVER_PORT: 8002
+      PERFORMANCE_DB_URL: ${PERFORMANCE_DB_URL:-jdbc:postgresql://performance-db:5432/performance_db}
+      PERFORMANCE_DB_USERNAME: ${PERFORMANCE_DB_USERNAME:-ticket_performance}
+      PERFORMANCE_DB_PASSWORD: ${PERFORMANCE_DB_PASSWORD:-ticket_performance_pw}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+
+  booking-service:
+    build:
+      context: ./booking-service
+    image: ticket-booking/booking-service:${IMAGE_TAG:-local}
+    container_name: ticket-booking-service
+    depends_on:
+      - booking-db
+      - redis
+      - kafka
+    environment:
+      SERVER_PORT: 8003
+      BOOKING_DB_URL: ${BOOKING_DB_URL:-jdbc:postgresql://booking-db:5432/booking_db}
+      BOOKING_DB_USERNAME: ${BOOKING_DB_USERNAME:-ticket_booking}
+      BOOKING_DB_PASSWORD: ${BOOKING_DB_PASSWORD:-ticket_booking_pw}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+    ports:
+      - "8003:8003"
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: ./notification-service
+    image: ticket-booking/notification-service:${IMAGE_TAG:-local}
+    container_name: ticket-notification-service
+    depends_on:
+      - notification-db
+      - kafka
+    environment:
+      SERVER_PORT: 8004
+      MONGODB_URI: ${MONGODB_URI:-mongodb://ticket_mongo:ticket_mongo_pw@notification-db:27017/notification_db?authSource=admin}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+    ports:
+      - "8004:8004"
+    restart: unless-stopped
+
+  queue-service:
+    build:
+      context: ./queue-service
+    image: ticket-booking/queue-service:${IMAGE_TAG:-local}
+    container_name: ticket-queue-service
+    depends_on:
+      - redis
+    environment:
+      SERVER_PORT: 8005
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    ports:
+      - "8005:8005"
+    restart: unless-stopped

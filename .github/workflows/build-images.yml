@@ -1,0 +1,44 @@
+name: Build Images
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build jars
+        run: ./gradlew build --no-daemon
+
+      - name: Validate compose files
+        run: docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.app.yml config --quiet
+
+      - name: Build Docker images
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t ticket-booking/api-gateway:${IMAGE_TAG} api-gateway
+          docker build -t ticket-booking/user-service:${IMAGE_TAG} user-service
+          docker build -t ticket-booking/performance-service:${IMAGE_TAG} performance-service
+          docker build -t ticket-booking/booking-service:${IMAGE_TAG} booking-service
+          docker build -t ticket-booking/notification-service:${IMAGE_TAG} notification-service
+          docker build -t ticket-booking/queue-service:${IMAGE_TAG} queue-service

@@ -70,18 +70,29 @@ docker compose up --help | grep -q -- '--wait-timeout' || exit 1
 Create the local environment file:
 
 ```bash
-cp .env.example .env
+[ ! -e .env ] || {
+  printf '%s\n' '.env already exists; refusing to overwrite it' >&2
+  exit 1
+}
+(
+  umask 077
+  cp .env.example .env
+) || exit 1
+chmod 600 .env || exit 1
 ```
 
 The local-only `.env` is ignored and must not be committed. Replace every sample
 secret before use, keep the file private, and never paste expanded secret values
 into logs or evidence.
 
-Before Bash sources `.env`, validate it as inert text with this canonical
-Bash-3.2-compatible function. It permits blank separator lines, but rejects
-comments, whitespace-only lines, quotes, duplicate/unknown/missing keys, empty or
-malformed assignments, and every character outside the conservative value
-alphabet. Error output identifies only a line number or key, never a value:
+Before Bash sources `.env`, validate it as inert text and require exact private
+file mode `600` with these canonical Bash-3.2-compatible functions. The validator
+permits blank separator lines, but rejects comments, whitespace-only lines,
+quotes, duplicate/unknown/missing keys, empty or malformed assignments, and every
+character outside the conservative value alphabet. The loader accepts only the
+exact repository-root `.env`, validates content and mode before sourcing
+`./.env`, exports every assignment, and restores `set +a`. Error output identifies
+only a line number, key, file, or mode requirement, never a value:
 
 ```bash
 validate_dotenv() {
@@ -168,7 +179,42 @@ validate_dotenv() {
   done
 }
 
-validate_dotenv .env || exit 1
+load_dotenv() {
+  local file="${1:-.env}"
+  local mode
+
+  [ "$file" = ".env" ] || {
+    printf 'dotenv loader accepts only .env: %s\n' "$file" >&2
+    return 1
+  }
+  [ -f "$file" ] && [ ! -L "$file" ] || {
+    printf 'dotenv must be a regular non-symlink file: %s\n' "$file" >&2
+    return 1
+  }
+
+  if mode="$(stat -f %Lp "$file" 2>/dev/null)"; then
+    :
+  elif mode="$(stat -c %a "$file" 2>/dev/null)"; then
+    :
+  else
+    printf 'could not read dotenv mode: %s\n' "$file" >&2
+    return 1
+  fi
+  [ "$mode" = "600" ] || {
+    printf 'dotenv must have mode 600: %s\n' "$file" >&2
+    return 1
+  }
+
+  validate_dotenv "$file" || return 1
+  set -a
+  if ! . ./.env; then
+    set +a
+    return 1
+  fi
+  set +a
+}
+
+load_dotenv .env || exit 1
 ```
 
 The allowed general value alphabet is `[A-Za-z0-9._:/@?=-]+`. Mongo root
@@ -178,9 +224,36 @@ the shared file cannot contain shell-executable characters such as `$`, backtick
 This restricted shared dotenv format prevents Bash execution and Compose semantic drift. A secret that cannot fit the format requires redesigning/encoding
 the connection configuration; do not copy-paste it into this sourced file.
 
-Run the canonical validator block once in every new verification Bash shell and
-require `validate_dotenv .env` to pass before any `source ./.env || exit 1`. Later sections
-reuse that function by name instead of redefining it.
+Run the canonical validator/loader block once in every new verification Bash
+shell and require `load_dotenv .env || exit 1` before Compose or host processes.
+Later sections reuse the functions by name instead of redefining either one.
+Sourcing the validated file overwrites ordinary ambient variables with its exact
+assignments, so `.env` is the actual environment input and `--env-file` is not the
+only protection against ambient precedence.
+
+Verify that ambient input is overwritten without printing either value:
+
+```bash
+EXPECTED_USER_DB_NAME="$(sed -n 's/^USER_DB_NAME=//p' .env)" || exit 1
+test -n "$EXPECTED_USER_DB_NAME" || exit 1
+export USER_DB_NAME=task4-ambient-override-must-not-survive
+load_dotenv .env || exit 1
+test "$USER_DB_NAME" = "$EXPECTED_USER_DB_NAME" || exit 1
+unset EXPECTED_USER_DB_NAME
+docker compose --env-file .env -f docker-compose.yml config --quiet || exit 1
+```
+
+Also prove the base configuration fails closed when no required database
+initialization input exists. Both output streams are discarded so this negative
+test cannot expose values:
+
+```bash
+if env -i PATH="$PATH" docker compose --env-file /dev/null \
+  -f docker-compose.yml config --quiet >/dev/null 2>&1; then
+  printf '%s\n' 'empty environment unexpectedly rendered the base configuration' >&2
+  exit 1
+fi
+```
 
 The current MongoDB URI is assembled directly from the root username and password
 in container mode, while host mode reads the URI from `.env`. Until that connection
@@ -203,7 +276,7 @@ SDK/toolchain. Do not depend on a machine-specific repository or JDK path.
 Host-dev mode runs only the base infrastructure in containers:
 
 ```bash
-validate_dotenv .env || exit 1
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml up -d --wait --wait-timeout 180
 ```
 
@@ -212,18 +285,18 @@ in that terminal. First run the canonical validator function in each terminal;
 then use this reusable form:
 
 ```bash
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :<module>:bootRun
+load_dotenv .env || exit 1; ./gradlew :<module>:bootRun
 ```
 
 Use one terminal/process for each of the six modules:
 
 ```bash
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :api-gateway:bootRun
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :user-service:bootRun
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :performance-service:bootRun
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :booking-service:bootRun
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :notification-service:bootRun
-validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :queue-service:bootRun
+load_dotenv .env || exit 1; ./gradlew :api-gateway:bootRun
+load_dotenv .env || exit 1; ./gradlew :user-service:bootRun
+load_dotenv .env || exit 1; ./gradlew :performance-service:bootRun
+load_dotenv .env || exit 1; ./gradlew :booking-service:bootRun
+load_dotenv .env || exit 1; ./gradlew :notification-service:bootRun
+load_dotenv .env || exit 1; ./gradlew :queue-service:bootRun
 ```
 
 This mode preserves each application's localhost defaults and the infrastructure
@@ -232,6 +305,7 @@ all six host JVMs (for example, Ctrl-C in each terminal). Then remove only the b
 containers and network, without deleting volumes:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml down
 ```
 
@@ -260,7 +334,7 @@ done
 Validate the merged configuration, build images, and start the full stack:
 
 ```bash
-validate_dotenv .env || exit 1
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml config --quiet
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml build
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml up -d --wait --wait-timeout 180
@@ -355,10 +429,7 @@ block and the single application-health helper block above before continuing.
 Export `.env` only after validation succeeds:
 
 ```bash
-validate_dotenv .env || exit 1
-set -a
-source ./.env || exit 1
-set +a
+load_dotenv .env || exit 1
 ```
 
 ### 1. Create a fresh performance and seat dataset
@@ -643,6 +714,7 @@ Run one dependency drill at a time. Never restart two dependencies together.
 Before each drill, save the pre-state named in the table. Use the merged project:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml restart <dependency>
 ```
 
@@ -715,10 +787,7 @@ Use one fresh lower-case UUID as the run ID for the PostgreSQL, MongoDB, and Red
 sentinels. Export `.env` in the same shell:
 
 ```bash
-validate_dotenv .env || exit 1
-set -a
-source ./.env || exit 1
-set +a
+load_dotenv .env || exit 1
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 ```
 
@@ -790,26 +859,31 @@ test "$REDIS_QUEUE_AFTER" = "$REDIS_QUEUE_BEFORE" || exit 1
 
 Upsert the Mongo sentinel, then capture a deterministic JSON projection containing
 only `_id` and `value`. `--quiet` and the projection prevent unrelated document
-fields from entering the evidence; none of these commands prints the password:
+fields from entering the evidence. The host passes only literal credential
+variable names in the single-quoted `sh -ec` program; each credential expands
+only inside the database container, and none of these commands prints it:
 
 ```bash
 MONGO_SENTINEL_EXPECTED="{\"_id\":\"${RUN_ID}\",\"value\":\"preserve-me\"}"
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
-  mongosh --quiet \
-  --username "$MONGO_INITDB_ROOT_USERNAME" \
-  --password "$MONGO_INITDB_ROOT_PASSWORD" \
-  --authenticationDatabase admin \
-  notification_db \
-  --eval "const result=db.m4_sentinels.updateOne({_id:'${RUN_ID}'},{\$set:{value:'preserve-me'}},{upsert:true}); if (!result.acknowledged) { quit(2); }" \
-  >/dev/null || exit 1
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T \
+  -e TASK4_RUN_ID="$RUN_ID" notification-db sh -ec '
+    mongosh --quiet \
+      --username "$MONGO_INITDB_ROOT_USERNAME" \
+      --password "$MONGO_INITDB_ROOT_PASSWORD" \
+      --authenticationDatabase admin \
+      notification_db \
+      --eval "const runId=process.env.TASK4_RUN_ID; const result=db.m4_sentinels.updateOne({_id:runId},{\$set:{value:\"preserve-me\"}},{upsert:true}); if (!result.acknowledged) { quit(2); }"
+  ' >/dev/null || exit 1
 
-MONGO_SENTINEL_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
-  mongosh --quiet \
-  --username "$MONGO_INITDB_ROOT_USERNAME" \
-  --password "$MONGO_INITDB_ROOT_PASSWORD" \
-  --authenticationDatabase admin \
-  notification_db \
-  --eval "const doc=db.m4_sentinels.findOne({_id:'${RUN_ID}'},{_id:1,value:1}); if (doc === null) { quit(2); } print(JSON.stringify({_id:doc._id,value:doc.value}));")" || exit 1
+MONGO_SENTINEL_BEFORE="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T \
+  -e TASK4_RUN_ID="$RUN_ID" notification-db sh -ec '
+    mongosh --quiet \
+      --username "$MONGO_INITDB_ROOT_USERNAME" \
+      --password "$MONGO_INITDB_ROOT_PASSWORD" \
+      --authenticationDatabase admin \
+      notification_db \
+      --eval "const runId=process.env.TASK4_RUN_ID; const doc=db.m4_sentinels.findOne({_id:runId},{_id:1,value:1}); if (doc === null) { quit(2); } print(JSON.stringify({_id:doc._id,value:doc.value}));"
+  ')" || exit 1
 test -n "$MONGO_SENTINEL_BEFORE" || exit 1
 test "$MONGO_SENTINEL_BEFORE" = "$MONGO_SENTINEL_EXPECTED" || exit 1
 ```
@@ -818,13 +892,15 @@ After the `notification-db` restart or full-stack down/up cycle, capture the sam
 canonical projection and require exact equality:
 
 ```bash
-MONGO_SENTINEL_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T notification-db \
-  mongosh --quiet \
-  --username "$MONGO_INITDB_ROOT_USERNAME" \
-  --password "$MONGO_INITDB_ROOT_PASSWORD" \
-  --authenticationDatabase admin \
-  notification_db \
-  --eval "const doc=db.m4_sentinels.findOne({_id:'${RUN_ID}'},{_id:1,value:1}); if (doc === null) { quit(2); } print(JSON.stringify({_id:doc._id,value:doc.value}));")" || exit 1
+MONGO_SENTINEL_AFTER="$(docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml exec -T \
+  -e TASK4_RUN_ID="$RUN_ID" notification-db sh -ec '
+    mongosh --quiet \
+      --username "$MONGO_INITDB_ROOT_USERNAME" \
+      --password "$MONGO_INITDB_ROOT_PASSWORD" \
+      --authenticationDatabase admin \
+      notification_db \
+      --eval "const runId=process.env.TASK4_RUN_ID; const doc=db.m4_sentinels.findOne({_id:runId},{_id:1,value:1}); if (doc === null) { quit(2); } print(JSON.stringify({_id:doc._id,value:doc.value}));"
+  ')" || exit 1
 test -n "$MONGO_SENTINEL_AFTER" || exit 1
 test "$MONGO_SENTINEL_AFTER" = "$MONGO_SENTINEL_EXPECTED" || exit 1
 test "$MONGO_SENTINEL_AFTER" = "$MONGO_SENTINEL_BEFORE" || exit 1
@@ -905,6 +981,7 @@ This settled-E2E/zero-backlog gate removes sequential pending work from the
 timeout-derived deadline. Stop Kafka through the merged project:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml stop kafka
 ```
 
@@ -938,6 +1015,7 @@ test "$NEGATIVE_OUTBOX_ROW" = "${NEGATIVE_EVENT_ID}|FAILED|1" || exit 1
 Recover Kafka and apply the 180-second infrastructure/application-health gate:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml up -d --wait --wait-timeout 180 kafka
 ```
 
@@ -1005,6 +1083,7 @@ equality assertion before starting host-dev applications.
 Stop the merged project without `-v`:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.app.yml down
 ```
 
@@ -1023,6 +1102,7 @@ remain. There are eight named volumes.
 Start only the base infrastructure and wait up to 180 seconds:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml up -d --wait --wait-timeout 180
 ```
 
@@ -1032,6 +1112,7 @@ host-dev JVMs, run all six application-health polls, and run one fresh Phase 1 E
 cycle. Stop the host JVMs and finish by taking down the base project:
 
 ```bash
+load_dotenv .env || exit 1
 docker compose --env-file .env -f docker-compose.yml down
 ```
 
@@ -1045,6 +1126,9 @@ volumes and their test data. `down -v` is destructive and forbidden without sepa
 - Functional Phase 1 is limited to performance plus booking. API gateway, user,
   notification, and queue remain application-health/schema/configuration
   skeletons, not completed gateway/auth/notification/queue flows.
+- Application services have no Compose healthcheck or restart policy. The
+  dependency drills verify reconnect behavior of surviving application processes;
+  they do not verify application process or Docker daemon crash recovery.
 - An outbox event that reaches `FAILED` has no automatic retry or DLQ path.
 - Redis Commander uses a mutable `latest` tag, so supply-chain byte
   reproducibility is not claimed.

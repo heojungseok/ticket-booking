@@ -35,14 +35,34 @@ Java 21 is also required when applications run on the host. Run the shell snippe
 from the repository root; standard PostgreSQL/Kafka tools inside the containers
 are used by the verification procedures.
 
-Check the local commands and confirm this Compose build supports the two wait
-flags used by the guide:
+Run this prerequisite probe in Bash. It checks each command independently,
+parses the Bash invoked by `bash -c`, enforces Bash 3.2 or newer, and confirms this
+Compose build supports the two wait flags used by the guide:
 
 ```bash
-command -v bash || exit 1
-command -v uuidgen curl jq || exit 1
-bash --version | sed -n '1p'
-docker compose version || exit 1
+for required_command in bash uuidgen curl jq docker; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    printf 'missing required command: %s\n' "$required_command" >&2
+    exit 1
+  fi
+done
+
+BASH_VERSION_VALUE="$(bash -c 'printf "%s\n" "$BASH_VERSION"')" || exit 1
+BASH_MAJOR="${BASH_VERSION_VALUE%%.*}"
+BASH_VERSION_REST="${BASH_VERSION_VALUE#*.}"
+BASH_MINOR="${BASH_VERSION_REST%%.*}"
+case "$BASH_MAJOR" in
+  ''|*[!0-9]*) printf '%s\n' 'could not parse Bash major version' >&2; exit 1 ;;
+esac
+case "$BASH_MINOR" in
+  ''|*[!0-9]*) printf '%s\n' 'could not parse Bash minor version' >&2; exit 1 ;;
+esac
+if (( BASH_MAJOR < 3 || (BASH_MAJOR == 3 && BASH_MINOR < 2) )); then
+  printf '%s\n' 'Bash 3.2 or newer is required' >&2
+  exit 1
+fi
+
+docker compose version >/dev/null 2>&1 || exit 1
 docker compose up --help | grep -q -- '--wait' || exit 1
 docker compose up --help | grep -q -- '--wait-timeout' || exit 1
 ```
@@ -159,7 +179,7 @@ This restricted shared dotenv format prevents Bash execution and Compose semanti
 the connection configuration; do not copy-paste it into this sourced file.
 
 Run the canonical validator block once in every new verification Bash shell and
-require `validate_dotenv .env` to pass before any `source .env`. Later sections
+require `validate_dotenv .env` to pass before any `source ./.env || exit 1`. Later sections
 reuse that function by name instead of redefining it.
 
 The current MongoDB URI is assembled directly from the root username and password
@@ -192,18 +212,18 @@ in that terminal. First run the canonical validator function in each terminal;
 then use this reusable form:
 
 ```bash
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :<module>:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :<module>:bootRun
 ```
 
 Use one terminal/process for each of the six modules:
 
 ```bash
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :api-gateway:bootRun
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :user-service:bootRun
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :performance-service:bootRun
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :booking-service:bootRun
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :notification-service:bootRun
-validate_dotenv .env || exit 1; set -a; source .env; set +a; ./gradlew :queue-service:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :api-gateway:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :user-service:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :performance-service:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :booking-service:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :notification-service:bootRun
+validate_dotenv .env || exit 1; set -a; source ./.env || exit 1; set +a; ./gradlew :queue-service:bootRun
 ```
 
 This mode preserves each application's localhost defaults and the infrastructure
@@ -337,7 +357,7 @@ Export `.env` only after validation succeeds:
 ```bash
 validate_dotenv .env || exit 1
 set -a
-source .env
+source ./.env || exit 1
 set +a
 ```
 
@@ -697,7 +717,7 @@ sentinels. Export `.env` in the same shell:
 ```bash
 validate_dotenv .env || exit 1
 set -a
-source .env
+source ./.env || exit 1
 set +a
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 ```

@@ -95,7 +95,7 @@ services:
       - zookeeper-data:/var/lib/zookeeper/data
       - zookeeper-log:/var/lib/zookeeper/log
     healthcheck:
-      test: ["CMD", "cub", "zk-ready", "localhost", "2181", "5"]
+      test: ["CMD", "cub", "zk-ready", "localhost:2181", "5", "8", "1"]
       interval: 10s
       timeout: 8s
       retries: 8

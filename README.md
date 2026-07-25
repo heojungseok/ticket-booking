@@ -1119,6 +1119,26 @@ docker compose --env-file .env -f docker-compose.yml down
 The exact baseline cleanup command would add `-v`, deleting all eight named
 volumes and their test data. `down -v` is destructive and forbidden without separate explicit approval.
 
+## Image-build CI and deployment boundary
+
+`.github/workflows/build-images.yml` runs on pull requests, pushes to `main`, and
+manual dispatches. It verifies only the packaging path:
+
+1. run `./gradlew clean test bootJar --no-daemon`;
+2. require exactly one executable jar for each of the six services and validate
+   the combined Compose configuration with `.env.example`;
+3. build all six service images with the Git commit SHA as their tag.
+
+This is continuous integration, not continuous deployment. The workflow does not
+log in to AWS, push images to ECR, connect to a server, or deploy to EC2. Runtime
+credentials must never be committed or printed by CI.
+
+The next deployment slice is a separately reviewed manual ECR and single,
+short-lived EC2 exercise. It must define the server-side image/tag and private
+`.env` contract before adding automation. RDS, NAT Gateway, load balancers,
+Nginx, HTTPS, and CodeDeploy remain deferred until that EC2-only path is
+verified and its cost boundary is understood.
+
 ## Limitations
 
 - Local transport and broker/database connections are plaintext, single-node, and

@@ -3,9 +3,9 @@ services:
     image: postgres:16-alpine
     container_name: ticket-user-db
     environment:
-      POSTGRES_DB: ${USER_DB_NAME}
-      POSTGRES_USER: ${USER_DB_USERNAME}
-      POSTGRES_PASSWORD: ${USER_DB_PASSWORD}
+      POSTGRES_DB: ${USER_DB_NAME:?USER_DB_NAME is required}
+      POSTGRES_USER: ${USER_DB_USERNAME:?USER_DB_USERNAME is required}
+      POSTGRES_PASSWORD: ${USER_DB_PASSWORD:?USER_DB_PASSWORD is required}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -21,9 +21,9 @@ services:
     image: postgres:16-alpine
     container_name: ticket-performance-db
     environment:
-      POSTGRES_DB: ${PERFORMANCE_DB_NAME}
-      POSTGRES_USER: ${PERFORMANCE_DB_USERNAME}
-      POSTGRES_PASSWORD: ${PERFORMANCE_DB_PASSWORD}
+      POSTGRES_DB: ${PERFORMANCE_DB_NAME:?PERFORMANCE_DB_NAME is required}
+      POSTGRES_USER: ${PERFORMANCE_DB_USERNAME:?PERFORMANCE_DB_USERNAME is required}
+      POSTGRES_PASSWORD: ${PERFORMANCE_DB_PASSWORD:?PERFORMANCE_DB_PASSWORD is required}
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
@@ -39,9 +39,9 @@ services:
     image: postgres:16-alpine
     container_name: ticket-booking-db
     environment:
-      POSTGRES_DB: ${BOOKING_DB_NAME}
-      POSTGRES_USER: ${BOOKING_DB_USERNAME}
-      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
+      POSTGRES_DB: ${BOOKING_DB_NAME:?BOOKING_DB_NAME is required}
+      POSTGRES_USER: ${BOOKING_DB_USERNAME:?BOOKING_DB_USERNAME is required}
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD:?BOOKING_DB_PASSWORD is required}
     ports:
       - "127.0.0.1:5434:5432"
     volumes:
@@ -57,8 +57,8 @@ services:
     image: mongo:7
     container_name: ticket-notification-db
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?MONGO_INITDB_ROOT_USERNAME is required}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?MONGO_INITDB_ROOT_PASSWORD is required}
     ports:
       - "127.0.0.1:27017:27017"
     volumes:
